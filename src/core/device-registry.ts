@@ -7,7 +7,7 @@ import type { ExternalVendor, MappingResult } from "./types.js";
 function normalizeIds(value: unknown, ids: Map<string, string>, key?: string): unknown {
   const scalarKeys = new Set(["reportedByDeviceId", "sourceDeviceId", "fromDeviceId", "toDeviceId", "gatewayDeviceId", "baseDeviceId", "cpeDeviceId", "terminalDeviceId", "baseStationDeviceId"]);
   if (typeof value === "string" && key && scalarKeys.has(key)) return ids.get(value) ?? value;
-  if (Array.isArray(value)) return value.map((item) => key === "receivedTerminalDeviceIds" && typeof item === "string" ? ids.get(item) ?? item : normalizeIds(item, ids));
+  if (Array.isArray(value)) return value.map((item) => (key === "relatedDeviceIds" || key === "receivedTerminalDeviceIds") && typeof item === "string" ? ids.get(item) ?? item : normalizeIds(item, ids));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([childKey, item]) => [childKey, normalizeIds(item, ids, childKey)]));
   return value;
 }
@@ -15,7 +15,10 @@ function normalizeIds(value: unknown, ids: Map<string, string>, key?: string): u
 export function prepareCoreRequest(vendor: ExternalVendor, request: InvokeRequest): { request: InvokeRequest; mappings: MappingResult[]; normalized: boolean } {
   const ids = [...collectDeviceIds(request)];
   const { hits, misses } = readMappings(vendor, ids);
-  if (misses.length) return { request, mappings: hits, normalized: false };
+  const mappedHits = hits.filter((item) => item.mapped && item.assetId);
+  // Registration may have changed since a negative cache entry was written.
+  // Omit negative hits so Core resolves those device IDs again in the same request.
+  if (misses.length || mappedHits.length !== ids.length) return { request, mappings: mappedHits, normalized: false };
   const dictionary = new Map(hits.filter((item) => item.assetId).map((item) => [item.vendorDeviceId, item.assetId!]));
   return { request: normalizeIds(request, dictionary) as InvokeRequest, mappings: hits, normalized: true };
 }

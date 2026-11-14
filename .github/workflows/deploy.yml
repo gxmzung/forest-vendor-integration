@@ -1,6 +1,9 @@
 name: Deploy
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -24,6 +27,7 @@ jobs:
       - run: docker build -f dockerfile -t forest-vendor-integration:verify .
 
   deploy:
+    if: github.event_name == 'push' && github.repository == 'sonjh-github/forest-vendor-integration'
     needs: verify
     runs-on: ubuntu-latest
 
@@ -45,9 +49,6 @@ jobs:
             # .env가 없으면 배포 중단
             test -f .env
 
-            # 영구 로그 디렉터리
-            mkdir -p /home/ubuntu/logs/forest-vendor-integration
-
             # core와 통신하는 공용 사설 네트워크
             docker network inspect forest-backend >/dev/null 2>&1 || \
               docker network create forest-backend
@@ -56,7 +57,27 @@ jobs:
               -f dockerfile \
               -t forest-vendor-integration .
 
+            mkdir -p /home/ubuntu/server/forest-vendor-integration/data
+            sudo chown 1000:1000 /home/ubuntu/server/forest-vendor-integration/data
+
             docker rm -f forest-vendor-integration || true
+
+            # Clear only the disabled Excel forwarding queue after its worker stops.
+            python3 - <<'PY'
+            import pathlib, sqlite3
+            path = pathlib.Path('/home/ubuntu/server/forest-vendor-integration/data/log-queue.sqlite')
+            if path.is_file():
+                with sqlite3.connect(path, timeout=10) as db:
+                    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_log'").fetchone()
+                    if exists:
+                        deleted = db.execute('DELETE FROM pending_log').rowcount
+                        db.commit()
+                        remaining = db.execute('SELECT COUNT(*) FROM pending_log').fetchone()[0]
+                        assert remaining == 0
+                        print(f'Excel queue cleared: deleted={deleted}, remaining={remaining}')
+            else:
+                print('Excel queue absent; forwarding disabled')
+            PY
 
             docker run -d \
               --name forest-vendor-integration \
@@ -66,8 +87,8 @@ jobs:
               --log-opt max-file=5 \
               --env-file /home/ubuntu/server/forest-vendor-integration/.env \
               -e CORE_SERVER_URL=http://forest-core-server:18020 \
+              -v /home/ubuntu/server/forest-vendor-integration/data:/app/data \
               -p 127.0.0.1:18010:18010 \
-              -v /home/ubuntu/logs/forest-vendor-integration:/app/logs \
               forest-vendor-integration
 
             docker ps \
