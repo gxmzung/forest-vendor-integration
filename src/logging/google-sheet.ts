@@ -1,5 +1,4 @@
 import { DatabaseSync } from "node:sqlite";
-import { config } from "../config.js";
 
 export const GOOGLE_SHEET_LOG_URL = "https://script.google.com/macros/s/AKfycbwz8xbmTsbBzVz5Pc_r08QcF5gs6wTPXAUZn_X5ikyeJBQwKGoMqNc4SNmgrqg0k9NfcQ/exec";
 
@@ -50,9 +49,12 @@ export class GoogleSheetLogForwarder {
     private readonly concurrency = 8,
     private readonly fetcher: FetchLike = (input, init) => fetch(input, init),
     databasePath = ":memory:",
+    private readonly autoDrain = true,
+    private readonly sendIntervalMs = 0,
   ) {
     this.db = new DatabaseSync(databasePath);
     this.db.exec(`PRAGMA journal_mode=WAL;
+      PRAGMA busy_timeout=1000;
       CREATE TABLE IF NOT EXISTS pending_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         row_json TEXT NOT NULL,
@@ -60,22 +62,27 @@ export class GoogleSheetLogForwarder {
         next_attempt_at INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS pending_log_due ON pending_log(next_attempt_at, id);`);
-    queueMicrotask(() => this.drain());
+    if (autoDrain) queueMicrotask(() => this.drain());
   }
 
   enqueue(row: GoogleSheetLogRow): void {
     this.db.prepare("INSERT INTO pending_log(row_json) VALUES(?)").run(JSON.stringify(row));
-    this.drain();
+    if (this.autoDrain) this.drain();
   }
+
+  wake(): void { this.drain(); }
 
   private drain(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     while (this.active < this.concurrency) {
+      const now = Date.now();
+      // Avoid a backwards full scan when every queued row is leased or waiting for retry.
+      if (!this.db.prepare("SELECT 1 FROM pending_log WHERE next_attempt_at<=? LIMIT 1").get(now)) break;
       // Keep the current operational view fresh while draining historical backlog.
       // Walk rowids backwards; the due-time index otherwise sorts the entire backlog.
       const row = this.db.prepare("SELECT * FROM pending_log NOT INDEXED WHERE next_attempt_at<=? ORDER BY id DESC LIMIT 1")
-        .get(Date.now()) as { id: number; row_json: string; attempts: number } | undefined;
+        .get(now) as { id: number; row_json: string; attempts: number } | undefined;
       if (!row) break;
       // Lease survives a restart; only acknowledged writes are removed.
       this.db.prepare("UPDATE pending_log SET next_attempt_at=? WHERE id=?")
@@ -114,6 +121,8 @@ export class GoogleSheetLogForwarder {
       this.db.prepare("UPDATE pending_log SET attempts=attempts+1,next_attempt_at=? WHERE id=?")
         .run(Date.now() + delay, row.id);
       console.error(`Google Sheet 로그 전송 실패 (재시도 ${delay}ms): ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (this.sendIntervalMs) await new Promise(resolve => setTimeout(resolve, this.sendIntervalMs));
     }
   }
 }
@@ -124,10 +133,3 @@ export class GoogleSheetLogForwarder {
 //   process.env.NODE_ENV === "production" ? "/app/data/log-queue.sqlite" : ":memory:",
 // );
 
-export const coreDbLogForwarder = new GoogleSheetLogForwarder(
-  `${config.coreServerUrl}/internal/v1/vendor-request-logs`,
-  config.coreRequestTimeoutMs,
-  4,
-  undefined,
-  process.env.NODE_ENV === "production" ? "/app/data/core-log-queue.sqlite" : ":memory:",
-);

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { classifyRequest, coreDbLogForwarder } from "./logging/google-sheet.js";
+import { classifyRequest } from "./logging/google-sheet.js";
+import { coreDbLogForwarder } from "./logging/core-log-forwarder.js";
 import { vendorRoutes } from "./shared/routes.js";
 
 export const app = new Hono();
