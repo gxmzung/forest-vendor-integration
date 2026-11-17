@@ -73,7 +73,8 @@ export class GoogleSheetLogForwarder {
     this.timer = undefined;
     while (this.active < this.concurrency) {
       // Keep the current operational view fresh while draining historical backlog.
-      const row = this.db.prepare("SELECT * FROM pending_log WHERE next_attempt_at<=? ORDER BY id DESC LIMIT 1")
+      // Walk rowids backwards; the due-time index otherwise sorts the entire backlog.
+      const row = this.db.prepare("SELECT * FROM pending_log NOT INDEXED WHERE next_attempt_at<=? ORDER BY id DESC LIMIT 1")
         .get(Date.now()) as { id: number; row_json: string; attempts: number } | undefined;
       if (!row) break;
       // Lease survives a restart; only acknowledged writes are removed.
